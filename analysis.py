@@ -8,6 +8,7 @@ What is measured (and why):
 
 Internal codes are English; user-facing (Polish) wording lives in `texts.py`.
 """
+import copy
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -17,6 +18,10 @@ import texts
 
 # leads in which atrial activity (P waves, f/F waves) is usually best visible
 ATRIAL_LEADS = ["II", "III", "aVF", "V1"]
+
+
+class NotEnoughBeats(ValueError):
+    """Fewer than two heartbeats were found in every segment, so no interval can be measured."""
 
 
 @dataclass
@@ -37,14 +42,14 @@ class Result:
     cv: float
     nrmssd: float
     pct_large_changes: float
-    irregularity: str                   # "high" / "moderate" / "low"
+    irregularity: str                   # "high" / "moderate" / "low" / "unknown"
     p_correlation: float                # how similar the segments before each QRS are
     p_waves: str                        # "repeatable" / "absent" / "uncertain"
     spectrum_f: np.ndarray = None
     spectrum_p: np.ndarray = None
     dominant_freq: float = float("nan")
     organization_index: float = float("nan")
-    atrial_waves: str = ""              # "fibrillation" / "flutter" / "ambiguous" / "no_data"
+    atrial_waves: str = ""              # "fibrillation" / "flutter" / "ambiguous" / "none" / "no_data"
     p_examples: list = field(default_factory=list)   # (lead name, segments) for plotting
     conclusion: str = ""                # "af" / "flutter" / "sinus" / "unclear"
 
@@ -125,48 +130,93 @@ def assess_p_waves(windows):
 
 
 def _atrial_activity(lead, beats):
-    """Subtract the average beat shape (QRS + T); what remains is atrial activity."""
+    """Subtract the average beat shape (P + QRS + T); what remains is atrial activity.
+    The template starts 0.30 s before the R peak so a regular P wave is cancelled too and is
+    not mistaken for an f wave. Beats cut off at the column edges are cancelled partially.
+    Returns the signal and the slice between the first and the last beat's template, the only
+    part where every beat is cancelled (outside it a beat that was not detected may remain)."""
     fs = lead.fs
-    n0, n1 = int(-0.10 * fs), int(0.45 * fs)
+    n0, n1 = int(-0.30 * fs), int(0.45 * fs)
     idx = [int(np.argmin(np.abs(lead.t - tr))) for tr in beats]
-    idx = [i for i in idx if i + n0 >= 0 and i + n1 <= len(lead.mv)]
+    full = [i for i in idx if i + n0 >= 0 and i + n1 <= len(lead.mv)]
     x = lead.mv.copy()
-    if len(idx) < 2:
-        return x
-    template = np.mean([x[i + n0:i + n1] for i in idx], axis=0)
+    if len(full) < 2:
+        return x, slice(0, 0)
+    template = np.mean([x[i + n0:i + n1] for i in full], axis=0)
     for i in idx:
-        x[i + n0:i + n1] -= template
-    return x
+        a, b = max(0, i + n0), min(len(x), i + n1)
+        x[a:b] -= template[a - (i + n0):b - (i + n0)]
+    return x, slice(max(0, min(idx) + n0), min(len(x), max(idx) + n1))
+
+
+# common frequency axis, so spectra of scans with different resolutions (fs) can be averaged
+SPECTRUM_F = np.arange(0, 20.0001, 0.02)
+
+
+# Smallest atrial residual (RMS after cancelling the beats) counted as f/F waves. Below it the
+# line between beats is flat up to digitization noise; a regular rhythm leaves only a few uV here.
+# Very fine fibrillation waves can fall under it - the irregular RR intervals still show then.
+F_WAVE_MIN_MV = 0.02
+
+
+def _atrial_residual(lead, beats):
+    """Atrial activity band-passed to 3-12 Hz, and the mask of samples usable for it:
+    inside the span where every beat is cancelled and away from each QRS."""
+    x, span = _atrial_activity(lead, beats)
+    b, a = sps.butter(3, [3, 12], btype="band", fs=lead.fs)
+    x = sps.filtfilt(b, a, sps.detrend(x))
+    usable = np.zeros(len(x), bool)
+    usable[span] = True
+    for tr in beats:
+        usable &= ~((lead.t > tr - 0.08) & (lead.t < tr + 0.12))
+    return x, usable
+
+
+def _wave_floor(lead):
+    """F_WAVE_MIN_MV, or 1.5 px on a coarse scan where one pixel is already a large voltage step."""
+    return max(F_WAVE_MIN_MV, 1.5 / lead.px_per_mv)
 
 
 def atrial_spectrum(windows):
-    spectra = []
+    """Mean spectrum of the atrial activity in the atrial leads.
+    Returns (f, p, dominant frequency, organization index, status); status is "ok",
+    "none" (the line between beats is flat, no f/F waves) or "no_data" (too few beats)."""
+    f = SPECTRUM_F
+    band = (f >= 3) & (f <= 12)
+    spectra, analyzed = [], 0
     for w in windows:
         for l in w.leads:
             if l.name not in ATRIAL_LEADS:
                 continue
-            x = sps.detrend(_atrial_activity(l, w.beats))
+            x, span = _atrial_activity(l, w.beats)
+            x = x[span]
+            if len(x) < 1.5 * l.fs:
+                continue
+            analyzed += 1
+            residual, usable = _atrial_residual(l, w.beats)
+            if np.std(residual[usable]) < _wave_floor(l):
+                continue
+            x = sps.detrend(x)
             b, a = sps.butter(3, [2.5, 15], btype="band", fs=l.fs)
             x = sps.filtfilt(b, a, x)
-            nfft = 8192
-            f = np.fft.rfftfreq(nfft, 1 / l.fs)
+            nfft = max(8192, len(x))
             p = np.abs(np.fft.rfft(x * np.hanning(len(x)), nfft)) ** 2
-            band = (f >= 3) & (f <= 12)
+            p = np.interp(f, np.fft.rfftfreq(nfft, 1 / l.fs), p)
             spectra.append(p / p[band].sum())
     if not spectra:
-        return None, None, float("nan"), float("nan")
+        return None, None, float("nan"), float("nan"), ("none" if analyzed else "no_data")
     p = np.mean(spectra, axis=0)
-    band = (f >= 3) & (f <= 12)
     fd = float(f[band][np.argmax(p[band])])
     oi = float(p[(f >= fd - 0.5) & (f <= fd + 0.5)].sum() / p[band].sum())
-    return f, p, fd, oi
+    return f, p, fd, oi, "ok"
 
 
 def analyze(printouts):
     windows = []
     for pr in printouts:
         for k in sorted({l.column for l in pr.leads}):
-            leads = [l for l in pr.leads if l.column == k]
+            # copies, so trimming does not change the printout and analyze() can run again
+            leads = [copy.copy(l) for l in pr.leads if l.column == k]
             for l in leads:
                 _trim_edges(l)
             windows.append(Window(name=", ".join(l.name for l in leads), leads=leads))
@@ -179,14 +229,22 @@ def analyze(printouts):
         rr.extend(d)
         rr_window.extend([i] * len(d))
     rr, rr_window = np.array(rr), np.array(rr_window)
+    if rr.size == 0:
+        raise NotEnoughBeats()
 
     # successive differences only within a window (there is a gap in the recording between windows)
     diffs = np.concatenate([np.diff(rr[rr_window == i]) for i in range(len(windows))])
     mean_rr = rr.mean()
     cv = rr.std() / mean_rr
-    nrmssd = np.sqrt(np.mean(diffs ** 2)) / mean_rr
-    large = float(np.mean(np.abs(diffs) > 0.1 * mean_rr) * 100)
-    if nrmssd > 0.10 and cv > 0.08:
+    if diffs.size == 0:
+        # at most one interval per segment: nothing to compare, so regularity cannot be judged
+        nrmssd, large = float("nan"), float("nan")
+    else:
+        nrmssd = np.sqrt(np.mean(diffs ** 2)) / mean_rr
+        large = float(np.mean(np.abs(diffs) > 0.1 * mean_rr) * 100)
+    if np.isnan(nrmssd):
+        irregularity = "unknown"
+    elif nrmssd > 0.10 and cv > 0.08:
         irregularity = "high"
     elif nrmssd > 0.05:
         irregularity = "moderate"
@@ -194,9 +252,9 @@ def analyze(printouts):
         irregularity = "low"
 
     pk, p_verdict, examples = assess_p_waves(windows)
-    f, p, fd, oi = atrial_spectrum(windows)
-    if np.isnan(fd):
-        waves = "no_data"
+    f, p, fd, oi, status = atrial_spectrum(windows)
+    if status != "ok":
+        waves = status
     elif fd >= 5.8 or oi < 0.35:
         waves = "fibrillation"
     elif oi >= 0.5:
@@ -213,18 +271,13 @@ def analyze(printouts):
 
 
 def f_waves(window, lead):
-    """Individual atrial (f/F) waves between beats - peaks of the signal after QRS/T cancellation."""
+    """Individual atrial (f/F) waves between beats - peaks of the signal after P/QRS/T cancellation."""
     fs = lead.fs
-    x = _atrial_activity(lead, window.beats)
-    b, a = sps.butter(3, [3, 12], btype="band", fs=fs)
-    x = sps.filtfilt(b, a, sps.detrend(x))
-    outside_qrs = np.ones(len(x), bool)
-    for tr in window.beats:
-        outside_qrs &= ~((lead.t > tr - 0.08) & (lead.t < tr + 0.12))
-    if outside_qrs.sum() < fs * 0.5:
+    x, usable = _atrial_residual(lead, window.beats)
+    if usable.sum() < fs * 0.5 or np.std(x[usable]) < _wave_floor(lead):
         return np.array([])
-    peaks, _ = sps.find_peaks(x, distance=int(0.1 * fs), prominence=0.8 * np.std(x[outside_qrs]))
-    peaks = [p for p in peaks if outside_qrs[p]]
+    peaks, _ = sps.find_peaks(x, distance=int(0.1 * fs), prominence=0.8 * np.std(x[usable]))
+    peaks = [p for p in peaks if usable[p]]
     return lead.t[peaks]
 
 

@@ -97,6 +97,7 @@ S = {
         "irr_high": "The intervals jump around with no pattern, short then long. This is the most important sign of atrial fibrillation.",
         "irr_low": "The intervals are fairly similar.",
         "irr_mod": "The intervals differ somewhat. This can be normal (e.g. with breathing) or a few extra beats.",
+        "irr_unknown": "Each segment has too few beats to compare consecutive intervals.",
         "h_p": "5. Step three: is there a P wave before the beats?",
         "p_intro": ("The program cut out a short piece of the recording just before every beat and overlaid them. If "
                     "the atria work normally, every piece contains the same P bump, so the lines overlap (right chart). "
@@ -167,6 +168,7 @@ S = {
         "irr_high": "Odstępy skaczą bez wzoru, raz krótki, raz długi. To najważniejszy znak migotania przedsionków.",
         "irr_low": "Odstępy są dość podobne.",
         "irr_mod": "Odstępy trochę się różnią. Może to być normalne (np. przy oddychaniu) albo pojedyncze dodatkowe pobudzenia.",
+        "irr_unknown": "W każdym odcinku jest za mało uderzeń, żeby porównać kolejne odstępy.",
         "h_p": "5. Krok trzeci: czy przed uderzeniami jest załamek P?",
         "p_intro": ("Program wyciął krótki kawałek zapisu tuż przed każdym uderzeniem i nałożył je na siebie. Jeśli "
                     "przedsionki pracują prawidłowo, w każdym kawałku jest ten sam garb P, więc linie się pokrywają "
@@ -255,19 +257,21 @@ def generate(printouts, result, path, lang="en"):
         add(_figure(charts.strip_with_beats(w, lang), s["strip_caption"].format(i=i + 1, leads=w.name)))
     add(f"<h3>{s['h_rr_all']}</h3>")
     add(_figure(charts.rr_bars(r, lang), s["bars_caption"]))
-    irr_note = {"high": s["irr_high"], "low": s["irr_low"]}.get(r.irregularity, s["irr_mod"])
+    irr_note = {"high": s["irr_high"], "low": s["irr_low"], "unknown": s["irr_unknown"]}.get(r.irregularity, s["irr_mod"])
+    pct = lambda x: "–" if np.isnan(x) else f"{x:.0f}"
     add(f"""<div class="card"><table class="numbers">
 <tr><td>{s['n_rr']}</td><td>{len(r.rr)}</td></tr>
 <tr><td>{s['minmax']}</td><td>{n(rr_min)} s ({60 / rr_min:.0f}/min) / {n(rr_max)} s ({60 / rr_max:.0f}/min)</td></tr>
 <tr><td>{s['cv']}</td><td>{s['cv_n'].format(v=f"{r.cv * 100:.0f}")}</td></tr>
-<tr><td>{s['nrmssd']}</td><td>{s['nrmssd_n'].format(v=f"{r.nrmssd * 100:.0f}")}</td></tr>
-<tr><td>{s['large']}</td><td>{s['large_n'].format(v=f"{r.pct_large_changes:.0f}")}</td></tr>
+<tr><td>{s['nrmssd']}</td><td>{s['nrmssd_n'].format(v=pct(r.nrmssd * 100))}</td></tr>
+<tr><td>{s['large']}</td><td>{s['large_n'].format(v=pct(r.pct_large_changes))}</td></tr>
 </table></div>
 <div class="meaning"><b>{s['meaning']}</b> {s['irr_is'].format(v=irregularity)} {irr_note}</div>""")
 
     add(f"<h2>{s['h_p']}</h2><p>{s['p_intro']}</p>")
     add(_figure(charts.p_wave_overlay(r, lang)))
-    add(f"<div class='meaning'><b>{s['meaning']}</b> {s['p_result'].format(k=n(r.p_correlation), v=p_waves)}</div>")
+    add(f"<div class='meaning'><b>{s['meaning']}</b> "
+        f"{s['p_result'].format(k='–' if np.isnan(r.p_correlation) else n(r.p_correlation), v=p_waves)}</div>")
 
     if r.spectrum_f is not None:
         add(f"<h2>{s['h_f']}</h2><p>{s['f_intro']}</p>")

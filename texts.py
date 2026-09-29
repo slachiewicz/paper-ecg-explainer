@@ -53,8 +53,8 @@ CONCLUSIONS = {
 }
 
 IRREGULARITY = {
-    "en": {"high": "high", "moderate": "moderate", "low": "low"},
-    "pl": {"high": "wysoka", "moderate": "umiarkowana", "low": "niska"},
+    "en": {"high": "high", "moderate": "moderate", "low": "low", "unknown": "cannot tell (too few beats)"},
+    "pl": {"high": "wysoka", "moderate": "umiarkowana", "low": "niska", "unknown": "nie da się ocenić (za mało uderzeń)"},
 }
 P_WAVES = {
     "en": {"repeatable": "repeatable", "absent": "none repeatable", "uncertain": "uncertain"},
@@ -62,9 +62,9 @@ P_WAVES = {
 }
 ATRIAL_WAVES = {
     "en": {"fibrillation": "irregular/fast (as in fibrillation)", "flutter": "regular (as in flutter)",
-           "ambiguous": "ambiguous", "no_data": "no data"},
+           "ambiguous": "ambiguous", "none": "none seen (flat line)", "no_data": "no data"},
     "pl": {"fibrillation": "nieregularne/szybkie (jak w migotaniu)", "flutter": "regularne (jak w trzepotaniu)",
-           "ambiguous": "niejednoznaczne", "no_data": "brak danych"},
+           "ambiguous": "niejednoznaczne", "none": "nie widać (linia płaska)", "no_data": "brak danych"},
 }
 
 GLOSSARY = {
@@ -163,10 +163,11 @@ def anomaly_short(rr):
 
 
 def anomaly_pause(rr, mean_rr):
+    pct = (rr / mean_rr - 1) * 100
     return {
         "title": _both(lambda l, n: {"en": f"Longer pause: {n(rr)} s", "pl": f"Dłuższa przerwa: {n(rr)} s"}[l]),
-        "text": _both(lambda l, n: {"en": f"The interval is 50% longer than the average ({n(mean_rr)} s).",
-                                    "pl": f"Odstęp jest o połowę dłuższy niż średnia ({n(mean_rr)} s)."}[l]),
+        "text": _both(lambda l, n: {"en": f"The interval is {pct:.0f}% longer than the average ({n(mean_rr)} s).",
+                                    "pl": f"Odstęp jest o {pct:.0f}% dłuższy niż średnia ({n(mean_rr)} s)."}[l]),
     }
 
 
