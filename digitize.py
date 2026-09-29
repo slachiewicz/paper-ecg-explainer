@@ -16,6 +16,17 @@ from scipy import signal as sps
 
 MM_PER_SECOND = 25.0  # standard paper speed
 MM_PER_MV = 10.0      # standard gain
+# supported small-square size in pixels: about 150 dpi (5.9 px/mm) to 600 dpi (23.6 px/mm)
+MIN_PX_PER_MM, MAX_PX_PER_MM = 6, 25
+
+
+class DigitizeError(ValueError):
+    """The image cannot be read as an ECG printout. `code` selects the user-facing message."""
+
+    def __init__(self, code, **details):
+        super().__init__(code)
+        self.code = code
+        self.details = details
 
 
 @dataclass
@@ -60,6 +71,8 @@ def _grid_mask(rgb):
 def _paper_box(grid):
     rows = np.where(grid.mean(1) > 0.05)[0]
     cols = np.where(grid.mean(0) > 0.05)[0]
+    if rows.size < 2 or cols.size < 2:
+        raise DigitizeError("no_grid")
     return cols[0], rows[0], cols[-1], rows[-1]
 
 
@@ -83,7 +96,12 @@ def _grid_pitch(profile):
     p = profile - profile.mean()
     ac = np.correlate(p, p, mode="full")[len(p) - 1:]
     ac /= ac[0]
-    lag1 = 6 + int(np.argmax(ac[6:25]))
+    if len(ac) < 5 * MAX_PX_PER_MM + 8:
+        raise DigitizeError("no_grid")
+    lag1 = MIN_PX_PER_MM + int(np.argmax(ac[MIN_PX_PER_MM:MAX_PX_PER_MM]))
+    # a maximum at the edge of the search range means the real square is smaller or larger
+    if lag1 in (MIN_PX_PER_MM, MAX_PX_PER_MM - 1):
+        raise DigitizeError("resolution")
     # refine on the large square (5 mm), which is 5x longer
     lo, hi = 5 * lag1 - 6, 5 * lag1 + 7
     lag5 = lo + int(np.argmax(ac[lo:hi]))
@@ -208,13 +226,20 @@ def digitize(path, lead_names, rows=3, columns=2):
     x0, y0, x1, y1 = _paper_box(grid)
 
     paper = grid[y0:y1, x0:x1].astype(float)
-    px_per_mm = (_grid_pitch(paper.sum(0)) + _grid_pitch(paper.sum(1))) / 2
+    pitch_x, pitch_y = _grid_pitch(paper.sum(0)), _grid_pitch(paper.sum(1))
+    # squares are square on paper; a photo taken at an angle stretches them a little, but a large
+    # mismatch means one direction was measured wrong (e.g. at twice the real square)
+    if abs(pitch_x - pitch_y) > 0.2 * max(pitch_x, pitch_y):
+        raise DigitizeError("grid_unclear")
+    px_per_mm = (pitch_x + pitch_y) / 2
     fs = px_per_mm * MM_PER_SECOND
     px_per_mv = px_per_mm * MM_PER_MV
 
     printout = Printout(path=path, image=rgb, angle=angle, px_per_mm=px_per_mm, fs=fs)
 
     baselines = _lead_rows(trace, x0, x1, y0, y1, rows)
+    if len(baselines) < rows:
+        raise DigitizeError("rows", found=len(baselines), expected=rows)
     spacing = np.median(np.diff(baselines)) if len(baselines) > 1 else 300
     bands = [(int(yc - spacing * 0.3), int(yc + spacing * 0.3)) for yc in baselines]
     bounds = [x0]

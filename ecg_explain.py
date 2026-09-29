@@ -11,22 +11,26 @@ By default a 3-row x 2-column printout (e.g. AsCARD) is assumed:
   second file -> V1, V2, V3 | V4, V5, V6
 """
 import argparse
+import math
 import os
 import shutil
 import subprocess
 import sys
 import webbrowser
+from pathlib import Path
 
 import report
 import texts
 import viewer
-from analysis import analyze
-from digitize import digitize
+from analysis import NotEnoughBeats, analyze
+from digitize import DigitizeError, digitize
 
 DEFAULT_LEADS = [
     "I,II,III,aVR,aVL,aVF",
     "V1,V2,V3,V4,V5,V6",
 ]
+# standard spelling of every lead name, so "avf" or "ii" given with --leads still matches
+CANONICAL_LEADS = {name.lower(): name for name in ",".join(DEFAULT_LEADS).split(",")}
 
 BROWSER_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -45,7 +49,15 @@ CONSOLE = {
            "disclaimer": "Educational tool - not a substitute for a doctor's assessment.",
            "missing": "File not found: {f}",
            "missing_hint": 'Give the full path to the scan, e.g. "C:\\Users\\me\\Desktop\\ecg\\scan1.jpg" '
-                           "(in quotes if it contains spaces)."},
+                           "(in quotes if it contains spaces).",
+           "no_grid": "{f}: no red ECG grid found. The program needs a colour scan or photo of a printout "
+                      "on red-grid paper (a black-and-white copy will not work).",
+           "grid_unclear": "{f}: the grid squares could not be measured reliably. Try a sharper, straight, "
+                           "evenly lit scan.",
+           "resolution": "{f}: the grid squares are too small or too large in pixels. Scan at 150-600 dpi, "
+                         "or take the photo so the printout fills the frame.",
+           "rows": "{f}: found {found} of {expected} rows of traces. Is this a 3-row x 2-column printout?",
+           "no_beats": "No heartbeats could be found in the traces. Check that the scan shows the ECG lines clearly."},
     "pl": {"reading": "Odczytuję {f} ...", "analyzing": "Analizuję rytm ...", "pdf": "Przygotowuję PDF do druku ...",
            "rate": "Średnie tętno", "irr": "Nierówność rytmu", "p": "Załamki P", "f": "Falowanie linii",
            "result": "Wniosek", "viewer": "Przeglądarka", "report": "Raport", "print": "Do druku (PDF)",
@@ -53,13 +65,21 @@ CONSOLE = {
            "disclaimer": "Narzędzie edukacyjne - nie zastępuje oceny lekarza.",
            "missing": "Nie znaleziono pliku: {f}",
            "missing_hint": 'Podaj pełną ścieżkę do skanu, np. "C:\\Users\\ja\\Pulpit\\ekg\\skan1.jpg" '
-                           "(w cudzysłowie, jeśli zawiera spacje)."},
+                           "(w cudzysłowie, jeśli zawiera spacje).",
+           "no_grid": "{f}: nie znaleziono czerwonej siatki EKG. Program potrzebuje kolorowego skanu lub zdjęcia "
+                      "wydruku na papierze z czerwoną siatką (kopia czarno-biała nie zadziała).",
+           "grid_unclear": "{f}: nie udało się pewnie zmierzyć kratki. Spróbuj ostrzejszego, prostego, "
+                           "równo oświetlonego skanu.",
+           "resolution": "{f}: kratka siatki ma za mało lub za dużo pikseli. Skanuj w 150-600 dpi "
+                         "albo zrób zdjęcie tak, żeby wydruk wypełniał kadr.",
+           "rows": "{f}: znaleziono {found} z {expected} rzędów zapisu. Czy to wydruk 3 rzędy x 2 kolumny?",
+           "no_beats": "Nie znaleziono uderzeń serca w zapisie. Sprawdź, czy linie EKG są na skanie wyraźne."},
 }
 
 
 def save_pdf(html_path, pdf_path):
     """Print the viewer to PDF (A4 landscape) with a headless Edge/Chrome."""
-    url = "file:///" + os.path.abspath(html_path).replace(os.sep, "/")
+    url = Path(html_path).resolve().as_uri()
     for candidate in BROWSER_CANDIDATES:
         exe = candidate if os.path.isfile(candidate) else shutil.which(candidate)
         if not exe:
@@ -101,10 +121,16 @@ def main():
         if len(leads) != 6:
             sys.exit(f"{path}: give 6 lead names (3 rows x 2 columns).")
         print(c["reading"].format(f=path))
-        printouts.append(digitize(path, [x.strip() for x in leads]))
+        try:
+            printouts.append(digitize(path, [CANONICAL_LEADS.get(x.strip().lower(), x.strip()) for x in leads]))
+        except DigitizeError as e:
+            sys.exit(c[e.code].format(f=path, **e.details))
 
     print(c["analyzing"])
-    result = analyze(printouts)
+    try:
+        result = analyze(printouts)
+    except NotEnoughBeats:
+        sys.exit(c["no_beats"])
     folder = args.output or os.path.dirname(os.path.abspath(args.files[0]))
     os.makedirs(folder, exist_ok=True)
     report_path = os.path.join(folder, "ecg_report.html")
@@ -116,12 +142,17 @@ def main():
     pdf_ok = save_pdf(viewer_path, pdf_path)
 
     lang = args.lang
+    irr = texts.IRREGULARITY[lang][result.irregularity]
+    p_waves = texts.P_WAVES[lang][result.p_waves]
+    waves = texts.ATRIAL_WAVES[lang][result.atrial_waves]
     print()
     print(f"  {c['rate']:<22}{result.heart_rate:.0f}/min")
-    print(f"  {c['irr']:<22}{texts.IRREGULARITY[lang][result.irregularity]} "
-          f"(nRMSSD {result.nrmssd * 100:.0f}%, CV {result.cv * 100:.0f}%)")
-    print(f"  {c['p']:<22}{texts.P_WAVES[lang][result.p_waves]} ({texts.num(result.p_correlation, 2, lang)})")
-    print(f"  {c['f']:<22}~{result.dominant_freq * 60:.0f}/min, {texts.ATRIAL_WAVES[lang][result.atrial_waves]}")
+    print(f"  {c['irr']:<22}{irr}" + ("" if math.isnan(result.nrmssd) else
+                                     f" (nRMSSD {result.nrmssd * 100:.0f}%, CV {result.cv * 100:.0f}%)"))
+    print(f"  {c['p']:<22}{p_waves}" + ("" if math.isnan(result.p_correlation) else
+                                        f" ({texts.num(result.p_correlation, 2, lang)})"))
+    print(f"  {c['f']:<22}" + (waves if math.isnan(result.dominant_freq) else
+                               f"~{result.dominant_freq * 60:.0f}/min, {waves}"))
     print(f"  {c['result']:<22}{texts.CONCLUSIONS[result.conclusion][lang][1]}")
     print()
     print(f"{c['viewer']}: {viewer_path}")
@@ -129,7 +160,7 @@ def main():
     print(f"{c['print']}: {pdf_path}" if pdf_ok else c["no_pdf"])
     print(c["disclaimer"])
     if not args.no_open:
-        webbrowser.open("file:///" + os.path.abspath(viewer_path).replace(os.sep, "/"))
+        webbrowser.open(Path(viewer_path).resolve().as_uri())
 
 
 if __name__ == "__main__":
