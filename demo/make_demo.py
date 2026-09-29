@@ -1,10 +1,13 @@
 """
 Generate two FICTIONAL ECG printout scans (3 rows x 2 columns, like AsCARD) with simulated
-atrial fibrillation. Used for the demo, screenshots and testing. Not a recording of any real person.
+atrial fibrillation, or a normal (sinus) rhythm with --sinus RATE. Used for the demo, screenshots
+and testing. Not a recording of any real person.
 
     uv run demo/make_demo.py
     uv run ecg_explain.py demo/demo_limb.png demo/demo_chest.png -o demo/output
+    uv run demo/make_demo.py --sinus 72     # normal rhythm at 72/min, for comparison
 """
+import argparse
 import os
 
 import cv2
@@ -37,19 +40,28 @@ def af_beats(rng):
     return np.array(r)
 
 
-def lead_signal(name, r, t, rng):
+def sinus_beats(rng, rate):
+    r = np.arange(0.25, DURATION - 0.15, 60 / rate)
+    return r + rng.normal(0, 0.01, len(r))
+
+
+def lead_signal(name, r, t, rng, sinus=False):
     qrs, tw, f = LEADS[name]
     y = np.zeros_like(t)
     for tr in r:
         y += (_g(t, -0.12 * qrs, tr - 0.03, 0.008) + _g(t, qrs, tr, 0.011)
               + _g(t, -0.3 * abs(qrs), tr + 0.03, 0.01) + _g(t, tw, tr + 0.26, 0.045))
-    phase = rng.uniform(0, 2 * np.pi, 3)
-    y += f * (0.05 * np.sin(2 * np.pi * 6.2 * t + phase[0]) + 0.03 * np.sin(2 * np.pi * 7.7 * t + phase[1])
-              + 0.02 * np.sin(2 * np.pi * 5.3 * t + phase[2]))
+        if sinus:
+            y += _g(t, 0.15, tr - 0.16, 0.025)   # P wave: the atria contract before every beat
+    if not sinus:
+        phase = rng.uniform(0, 2 * np.pi, 3)
+        y += f * (0.05 * np.sin(2 * np.pi * 6.2 * t + phase[0]) + 0.03 * np.sin(2 * np.pi * 7.7 * t + phase[1])
+                  + 0.02 * np.sin(2 * np.pi * 5.3 * t + phase[2]))
     return y + rng.normal(0, 0.006, len(t))
 
 
-def make_scan(names, filename, seed):
+def make_scan(names, filename, seed, sinus_rate=None, folder=FOLDER):
+    """sinus_rate=None draws atrial fibrillation, a number draws a normal rhythm at that rate."""
     rng = np.random.default_rng(seed)
     h, w = 2409, 3436
     img = np.full((h, w, 3), 246, np.uint8)
@@ -65,10 +77,10 @@ def make_scan(names, filename, seed):
     t = np.arange(0, DURATION, 1 / FS)
     ink = (35, 35, 35)
     for k, xk in enumerate(columns):
-        r = af_beats(rng)
+        r = af_beats(rng) if sinus_rate is None else sinus_beats(rng, sinus_rate)
         for j, yb in enumerate(rows):
             name = names[k * 3 + j]
-            mv = lead_signal(name, r, t, rng)
+            mv = lead_signal(name, r, t, rng, sinus=sinus_rate is not None)
             pts = np.stack([xk + t * FS, yb - mv * PX_PER_MV], 1).astype(np.int32)
             cv2.polylines(img, [pts], False, ink, 3, cv2.LINE_AA)
             cv2.putText(img, name, (xk - 95, yb - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.3, ink, 3, cv2.LINE_AA)
@@ -83,10 +95,15 @@ def make_scan(names, filename, seed):
     # slight skew, like a real scan
     rot = cv2.getRotationMatrix2D((w / 2, h / 2), 0.6, 1.0)
     img = cv2.warpAffine(img, rot, (w, h), borderValue=(246, 246, 246))
-    cv2.imwrite(os.path.join(FOLDER, filename), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    path = os.path.join(folder, filename)
+    cv2.imwrite(path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    return path
 
 
 if __name__ == "__main__":
-    make_scan(["I", "II", "III", "aVR", "aVL", "aVF"], "demo_limb.png", 7)
-    make_scan(["V1", "V2", "V3", "V4", "V5", "V6"], "demo_chest.png", 11)
+    ap = argparse.ArgumentParser(description="Generate fictional ECG printout scans.")
+    ap.add_argument("--sinus", type=float, metavar="RATE", help="normal rhythm at RATE/min instead of fibrillation")
+    args = ap.parse_args()
+    make_scan(["I", "II", "III", "aVR", "aVL", "aVF"], "demo_limb.png", 7, args.sinus)
+    make_scan(["V1", "V2", "V3", "V4", "V5", "V6"], "demo_chest.png", 11, args.sinus)
     print("Saved demo/demo_limb.png and demo/demo_chest.png (fictional data).")
