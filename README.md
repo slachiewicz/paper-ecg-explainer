@@ -62,15 +62,22 @@ cd paper-ecg-explainer
 uv run demo/make_demo.py
 uv run ecg_explain.py demo/demo_limb.png demo/demo_chest.png -o demo/output
 
+# the same with a normal (sinus) rhythm at 72/min, for comparison
+uv run demo/make_demo.py --sinus 72
+uv run ecg_explain.py demo/demo_limb.png demo/demo_chest.png -o demo/output
+
 # your own scans (limb leads first, chest leads second), Polish output
 uv run ecg_explain.py scan_limb_leads.jpg scan_chest_leads.jpg --lang pl
+
+# a single picture works too (6 leads, less recording to judge the rhythm from)
+uv run ecg_explain.py scan_chest_leads.jpg --leads "V1,V2,V3,V4,V5,V6"
 ```
 
 | option | meaning |
 |--------|---------|
 | `--lang en\|pl` | language of the report and PDF, and the viewer's default language (default `en`) |
 | `-o, --output DIR` | output folder (default: folder of the first scan) |
-| `--leads "I,II,III,aVR,aVL,aVF"` | lead names for the next file, column by column from the top |
+| `--leads "I,II,III,aVR,aVL,aVF"` | lead names for the next file, column by column from the top (case does not matter) |
 | `--no-open` | do not open the viewer in the browser |
 
 The PDF is rendered by a locally installed Edge or Chrome in headless mode; without one, use the print button
@@ -85,6 +92,9 @@ By default the tool expects the common 3-row × 2-column printout (e.g. AsCARD):
 | 1st  | I, II, III  | aVR, aVL, aVF |
 | 2nd  | V1, V2, V3  | V4, V5, V6    |
 
+The scan must be in colour (the red grid is how the program finds the scale), straight to within
+3°, at about 150-600 dpi. If it is not, the program stops with a message saying what is wrong.
+
 ## Project layout
 
 | file | role |
@@ -95,7 +105,10 @@ By default the tool expects the common 3-row × 2-column printout (e.g. AsCARD):
 | `texts.py` | all user-facing wording in English and Polish |
 | `viewer.py`, `viewer_template.html` | interactive viewer (data builder + HTML/JS template with the EN/PL switch) |
 | `report.py`, `charts.py` | longer HTML report with charts |
-| `demo/make_demo.py` | generates fictional ECG scans for the demo |
+| `demo/make_demo.py` | generates fictional ECG scans for the demo and the tests |
+| `tests/` | end-to-end tests on fictional scans: fibrillation, normal and slow rhythm, mixed resolutions |
+
+Run the tests with `uv run pytest`.
 
 ## Limitations
 
